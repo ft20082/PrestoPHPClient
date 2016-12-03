@@ -20,6 +20,7 @@
 namespace kingnetdc;
 
 
+
 class PrestoClient {
 
     private $_source = 'PrestoPHPClient';
@@ -29,11 +30,12 @@ class PrestoClient {
     private $_timezone = '+8';
     private $_language = 'Chinese';
 
-    private $_tempNextUri;
+    private $_tempNextUri = NULL;
     private $_tempInfoUri;
     private $_tempPartialCancelUri;
     private $_tempState;
     private $_tempResult;
+    private $_tempColumns;
     private $_tempData;
 
     private $_uri;
@@ -55,8 +57,8 @@ class PrestoClient {
 
     private function _init($param) {
         $this->_userAgent = $this->_source . '/' . $this->_version;
-        $this->_curlHandle = \curl_init();
-        $this->_headers = [
+        $this->_curlHandle = new SimpleCurl();
+        $this->_headers = array(
             'X-Presto-Catalog:' . $this->_catalog,
             'X-Presto-Source:' . $this->_source,
             'X-Presto-Schema:' . $this->_schema,
@@ -64,7 +66,7 @@ class PrestoClient {
             'X-Presto-User:' . $this->_user,
             'X-Presto-Time-Zone:' . $this->_timezone,
             'X-Presto-Language:' . $this->_language,
-        ];
+        )    ;
         if($this->_checkParam($param, 'user')) {
             $this->_user = $param['user'];
         }
@@ -83,12 +85,17 @@ class PrestoClient {
     }
 
     /**
-     * query $sql and get result data
+     * @param $sql
+     * @return mixed
      */
     public function query($sql) {
         $this->_reset();
         $this->_buildQuery($sql);
         return $this->_getQueryData();
+    }
+
+    public function getColumns() {
+        return $this->_tempColumns;
     }
 
 
@@ -98,20 +105,14 @@ class PrestoClient {
 
 
     /**
-     * build query
+     * @param $sql
+     * @throws \Exception
      */
     private function _buildQuery($sql) {
-        $options = [
-            CURLOPT_URL => $this->_uri,
-            CURLOPT_HTTPHEADER => $this->_headers,
-            CURLOPT_RETURNTRANSFER => TRUE,
-            CURLOPT_POST => TRUE,
-            CURLOPT_POSTFIELDS => $sql,
-        ];
-        $this->_resetCurlOptions();
-        $this->_setCurlOptions($options);
-        $this->_tempResult = $this->_getCurlExec();
-        $httpCode = $this->_getCurlInfo(CURLINFO_HTTP_CODE);
+        $this->_curlHandle->reset();
+        $this->_curlHandle->setHeader($this->_headers);
+        $this->_tempResult = $this->_curlHandle->getPostContent($this->_uri, $sql);
+        $httpCode = $this->_curlHandle->getHttpCode();
         if($httpCode != 200) {
             throw new \Exception("Http Curl Error, error Code : " . $httpCode);
         }
@@ -119,13 +120,21 @@ class PrestoClient {
 
     /**
      * sleep for get query result data
+     * check http response code 200 or 503.
      */
     private function _getQueryData() {
         $this->_parseResultData();
+        $this->_curlHandle->reset();
         while($this->_tempNextUri) {
-            usleep(500000);
-            $this->_tempResult = file_get_contents($this->_tempNextUri);
-            $this->_parseResultData();
+            $this->_tempResult = $this->_curlHandle->getContent($this->_tempNextUri);
+            $httpCode = $this->_curlHandle->getHttpCode();
+            if($httpCode == 200) {
+                $this->_parseResultData();
+            } else if($httpCode != 503) {
+                $this->_error = $this->_curlHandle->getError();
+                throw new \Exception("Get query http response code error.");
+            }
+            usleep(200000);
         }
         if($this->_tempState != "FINISHED") {
             throw new \Exception("Presto query Error, error state : " . $this->_tempState);
@@ -136,28 +145,34 @@ class PrestoClient {
     private function _parseResultData() {
         $retArr = json_decode($this->_tempResult, TRUE);
         if($this->_debug) {
-            var_dump('---', $this->_tempResult);
+            var_dump('debug: ', $this->_tempResult);
         }
-        if(isset($retArr['nextUri'])) {
-            $this->_tempNextUri = $retArr['nextUri'];
-        } else {
-            $this->_tempNextUri = NULL;
+        if($retArr) {
+            if(isset($retArr['nextUri'])) {
+                $this->_tempNextUri = $retArr['nextUri'];
+            } else {
+                $this->_tempNextUri = NULL;
+            }
+            if(isset($retArr['data'])) {
+                $this->_tempData = array_merge($this->_tempData, $retArr['data']);
+            }
+            if(isset($retArr['columns'])) {
+                $this->_tempColumns = $retArr['columns'];
+            }
+            if(isset($retArr['infoUri'])) {
+                $this->_tempInfoUri = $retArr['infoUri'];
+            }
+            if(isset($retArr['partialCancelUri'])) {
+                $this->_tempPartialCancelUri = $retArr['partialCancelUri'];
+            }
+            if(isset($retArr['stats']['state'])) {
+                $this->_tempState = $retArr['stats']['state'];
+            }
+            if(isset($retArr['error'])) {
+                $this->_error = $retArr['error'];
+            }
         }
-        if(isset($retArr['data'])) {
-            $this->_tempData = array_merge($this->_tempData, $retArr['data']);
-        }
-        if(isset($retArr['infoUri'])) {
-            $this->_tempInfoUri = $retArr['infoUri'];
-        }
-        if(isset($retArr['partialCancelUri'])) {
-            $this->_tempPartialCancelUri = $retArr['partialCancelUri'];
-        }
-        if(isset($retArr['stats'])) {
-            $this->_tempState = $retArr['stats']['state'];
-        }
-        if(isset($retArr['error'])) {
-            $this->_error = $retArr['error'];
-        }
+
     }
 
     /**
@@ -169,31 +184,77 @@ class PrestoClient {
         $this->_tempPartialCancelUri = NULL;
         $this->_tempState = 'NONE';
         $this->_tempResult = NULL;
-        $this->_tempData = [];
-    }
-
-    private function _getCurlInfo($option = 0) {
-        if($option != 0) {
-            return \curl_getinfo($this->_curlHandle, $option);
-        } else {
-            return \curl_getinfo($this->_curlHandle);
-        }
-
-    }
-
-    private function _getCurlExec() {
-        return \curl_exec($this->_curlHandle);
-    }
-
-    private function _setCurlOptions($param) {
-        \curl_setopt_array($this->_curlHandle, $param);
-    }
-
-    private function _resetCurlOptions() {
-        \curl_reset($this->_curlHandle);
+        $this->_tempData = array();
+        $this->_tempColumns = array();
     }
 
     private function _checkParam($param, $key) {
         return isset($param[$key]) && !empty($param[$key]);
     }
+}
+
+
+class SimpleCurl {
+
+    private $_handle;
+    private $_timeout = 10;
+    private $_header = array();
+
+    public function __construct() {
+        if(!function_exists("curl_init")) {
+            throw new \Exception("Presto Client need PHP Curl module!");
+        }
+        $this->_handle = \curl_init();
+    }
+
+    public function setHeader($header) {
+        $this->_header = $header;
+    }
+
+    public function setTimeout($timeout) {
+        $this->_timeout = $timeout;
+    }
+
+    public function getPostContent($url, $postFiled) {
+        return $this->getContent($url, "POST", $postFiled);
+    }
+
+    public function getContent($url, $method = "GET", $postField = "") {
+        \curl_setopt($this->_handle, CURLOPT_URL, $url);
+        \curl_setopt($this->_handle, CURLOPT_RETURNTRANSFER, TRUE);
+        if(!empty($this->_header)) {
+            \curl_setopt($this->_handle, CURLOPT_HTTPHEADER, $this->_header);
+        }
+        if($method === "POST") {
+            \curl_setopt($this->_handle, CURLOPT_POST, TRUE);
+            \curl_setopt($this->_handle, CURLOPT_POSTFIELDS, $postField);
+        }
+        return \curl_exec($this->_handle);
+    }
+
+    public function reset() {
+        $this->_header = array();
+        \curl_reset($this->_handle);
+    }
+
+    public function setCurlOptions($options) {
+        \curl_setopt_array($this->_handle, $options);
+    }
+
+    public function getHttpCode() {
+        return $this->getCurlInfo(CURLINFO_HTTP_CODE);
+    }
+
+    public function getCurlInfo($option = 0) {
+        return \curl_getinfo($this->_handle, $option);
+    }
+
+    public function getError() {
+        return \curl_error($this->_handle);
+    }
+
+    public function __destruct() {
+        \curl_close($this->_handle);
+    }
+
 }
