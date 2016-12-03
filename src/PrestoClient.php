@@ -66,7 +66,7 @@ class PrestoClient {
             'X-Presto-User:' . $this->_user,
             'X-Presto-Time-Zone:' . $this->_timezone,
             'X-Presto-Language:' . $this->_language,
-        )    ;
+        );
         if($this->_checkParam($param, 'user')) {
             $this->_user = $param['user'];
         }
@@ -94,11 +94,18 @@ class PrestoClient {
         return $this->_getQueryData();
     }
 
+    /**
+     * get columns
+     * @return mixed
+     */
     public function getColumns() {
         return $this->_tempColumns;
     }
 
-
+    /**
+     * get error info
+     * @return array
+     */
     public function getError() {
         return $this->_error;
     }
@@ -120,7 +127,7 @@ class PrestoClient {
 
     /**
      * sleep for get query result data
-     * check http response code 200 or 503.
+     * check http response code 200 or 503
      */
     private function _getQueryData() {
         $this->_parseResultData();
@@ -131,7 +138,7 @@ class PrestoClient {
             if($httpCode == 200) {
                 $this->_parseResultData();
             } else if($httpCode != 503) {
-                $this->_error = $this->_curlHandle->getError();
+                $this->_error[] = $this->_curlHandle->getError();
                 throw new \Exception("Get query http response code error.");
             }
             usleep(200000);
@@ -142,6 +149,9 @@ class PrestoClient {
         return $this->_tempData;
     }
 
+    /**
+     * parse result data every time
+     */
     private function _parseResultData() {
         $retArr = json_decode($this->_tempResult, TRUE);
         if($this->_debug) {
@@ -194,6 +204,10 @@ class PrestoClient {
 }
 
 
+/**
+ * Class SimpleCurl
+ * @package kingnetdc
+ */
 class SimpleCurl {
 
     private $_handle;
